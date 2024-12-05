@@ -23,18 +23,23 @@ import logging
 import json
 import sys
 
+sys.path.append('/work/home/acehekbmzh/cxx/BELLE/train')
 from src.utils import get_model_param_count
 from src.sample_generator import batch_grouped_pretrain_generate
-from src.models.llama.modeling_llama import LlamaForCausalLM
+from transformers import LlamaForCausalLM #from src.models.llama.modeling_llama import LlamaForCausalLM
+import subprocess
 
+#if version.parse(transformers.__version__) <= version.parse("4.30.2"):
+#    from src.trainer import MyTrainer as Trainer
+#else:
+#    from transformers import Trainer
 
-if version.parse(transformers.__version__) <= version.parse("4.30.2"):
-    from src.trainer import MyTrainer as Trainer
-else:
-    from transformers import Trainer
+from custom_trainer import CustomTrainer
 
 logger = logging.getLogger(__name__)
 
+os.environ["WANDB_DISABLED"] = "true"
+from datasets import concatenate_datasets
 
 @dataclass
 class ModelArguments:
@@ -67,6 +72,7 @@ class ModelArguments:
         },
     )
     llama: bool = field(default=False, metadata={"help": "Llama model"})
+    qwen: bool = field(default=False, metadata={"help": "Qwen model"})
 
 
 @dataclass
@@ -77,6 +83,9 @@ class DataArguments:
 
     train_file: Optional[str] = field(
         default=None, metadata={"help": "The input training data file (a text file)."}
+    )
+    multiple_preprocessed_dataset_files_config: Optional[str] = field(
+        default=None, metadata={"help": "The json file which record the paths of multiple datasets."}
     )
     validation_file: Optional[str] = field(
         default=None,
@@ -126,7 +135,7 @@ class TrainingArguments(TrainingArguments):
         },
     )
     report_to: str = field(
-        default="wandb",
+        default=None,#"wandb"
         metadata={
             "help": "The list of integrations to report the results and logs to."
         },
@@ -150,12 +159,68 @@ def print_rank_0(msg, log_file, rank=0):
             f.write(msg + "\n")
 
 
+def init_slurm_env():  # 初始化slurm，国超步骤？？？
+    if 'SLURM_PROCID' in os.environ:
+        proc_id = int(os.environ['SLURM_PROCID'])
+        if proc_id==0:
+            print('Init dist using slurm!')
+            print("Job Id is {} on {} ".format(os.environ["SLURM_JOBID"], os.environ['SLURM_NODELIST']))
+
+        ntasks = int(os.environ['SLURM_NTASKS'])
+        # node_list = os.environ['SLURM_NODELIST']
+        node_list = os.environ['SLURM_STEP_NODELIST']
+        # node_list = os.environ['SLURM_STEP_NODELIST']
+        num_gpus = torch.cuda.device_count()
+        addr = subprocess.getoutput(
+            'scontrol show hostname {} | head -n1'.format(node_list))
+        jobid = os.environ["SLURM_JOBID"]
+        stepid = os.environ["SLURM_STEP_ID"]
+       
+
+        tcp_port = os.environ.get('MASTER_PORT', 9904)
+
+
+        os.environ['MASTER_PORT'] =str(tcp_port)
+        os.environ['MASTER_ADDR'] = addr
+        os.environ['WORLD_SIZE'] = str(ntasks)
+        os.environ['RANK'] = str(proc_id)
+        os.environ['LOCAL_RANK'] = str(proc_id % num_gpus)
+        os.environ['LOCAL_SIZE'] = str(num_gpus)
+
+        print('rank: {} world size: {} addr: {}  port: {}'.format(proc_id, ntasks, addr, os.environ['MASTER_PORT']))
+
+def concatenate_multiple_train_datasets(multiple_dataset_files,cache_dir):
+    datasets_num=len(multiple_dataset_files)
+    train_data_list=[]
+    for dataset_index in range(datasets_num):
+        train_data_x=load_dataset("json", data_files=multiple_dataset_files[dataset_index],cache_dir=cache_dir)#,streaming=True)
+        train_data_list.append(train_data_x['train'])# DatasetDict
+    concat_datasets=concatenate_datasets(train_data_list) # Dataset
+    train_data=train_data_x
+    train_data['train']=concat_datasets # 把DatasetDict内的Dataset替换成别的Dataset，此时DatasetDict内参数也会自动变化
+    return train_data
+
+def get_gpu_memory_info():
+    try:
+        global_rank = torch.distributed.get_rank()
+        if global_rank==0:
+            # 执行hy-smi命令并获取输出
+            result = subprocess.check_output(['hy-smi'])
+            # 将输出转换为字符串
+            result_str = result.decode('utf-8')
+            print(f'rank : {global_rank}\n'+result_str)
+    except Exception as e:
+        print(f"Error executing hy-smi: {e}")
+
 def main():
+    init_slurm_env()   # 初始化国超
+    
     parser = HfArgumentParser((ModelArguments, DataArguments, TrainingArguments))
     model_args, data_args, training_args = parser.parse_args_into_dataclasses()
 
     world_size = int(os.environ.get("WORLD_SIZE", 1))
     global_rank = torch.distributed.get_rank()
+    get_gpu_memory_info()
     log_file = os.path.join(training_args.output_dir, "print_log.txt")
 
     # Setup logging
@@ -235,6 +300,7 @@ def main():
             model = AutoModelForCausalLM.from_pretrained(
                 model_args.model_name_or_path,
                 torch_dtype=torch_dtype,
+                trust_remote_code=True
             )
 
     if model_args.llama:
@@ -245,10 +311,14 @@ def main():
             global_rank,
         )
         tokenizer.add_special_tokens({'bos_token': '<s>', 'eos_token': '</s>', 'unk_token': '<unk>', 'pad_token': '<unk>'})
+        tokenizer.padding_side = "left"  # Allow batched inference
+    elif model_args.qwen:
+        tokenizer = AutoTokenizer.from_pretrained(model_args.model_name_or_path,padding_side="right",use_fast=False,trust_remote_code=True)
+        #tokenizer.pad_token_id = tokenizer.eod_id
     else:
-        tokenizer = AutoTokenizer.from_pretrained(model_args.model_name_or_path)
+        tokenizer = AutoTokenizer.from_pretrained(model_args.model_name_or_path,trust_remote_code=True)
         tokenizer.add_special_tokens({"pad_token": tokenizer.unk_token})
-    tokenizer.padding_side = "left"  # Allow batched inference
+        tokenizer.padding_side = "left"  # Allow batched inference
 
     print_rank_0(
         "tokenizer.eos_token_id = {}".format(tokenizer.eos_token_id),
@@ -310,47 +380,60 @@ def main():
     # model.is_parallelizable = True
     # model.model_parallel = True
 
-    assert os.path.exists(data_args.train_file), "{} file not exists".format(
-        data_args.train_file
-    )
-
-    with torch_distributed_zero_first(global_rank):
-        train_data = load_dataset(
-            "json", data_files=data_args.train_file, cache_dir=model_args.cache_dir
+    #assert os.path.exists(data_args.train_file), "{} file not exists".format(
+    #    data_args.train_file
+    #)
+    if data_args.train_file==None and data_args.multiple_preprocessed_dataset_files_config != None:
+        with open(data_args.multiple_preprocessed_dataset_files_config,'r') as jsonfile:
+            multiple_data_files_list=json.load(jsonfile)["path"]
+    for train_file_x in multiple_data_files_list:
+        assert os.path.exists(train_file_x), "{} file not exists".format(
+            train_file_x
         )
 
+    with torch_distributed_zero_first(global_rank):
+        train_data=concatenate_multiple_train_datasets(multiple_dataset_files=multiple_data_files_list,cache_dir=model_args.cache_dir)
+        #train_data = load_dataset(
+        #    "json", data_files=data_args.train_file, cache_dir=model_args.cache_dir
+        #)
+        
         val_data = load_dataset(
             "json", data_files=data_args.validation_file, cache_dir=model_args.cache_dir
         )
 
-        train_data = (
-            train_data["train"]
-            .shuffle()
-            .map(
-                partial(
-                    batch_grouped_pretrain_generate,
-                    training_args.model_max_length,
-                    tokenizer,
-                ),
-                batched=True,
-                desc=f"Grouping texts in chunks of {training_args.model_max_length}",
-                remove_columns="text",
-            )
-        )
+        #train_data = (
+        #    train_data["train"]
+        #    .shuffle()
+        #    .map(
+        #        partial(
+        #            batch_grouped_pretrain_generate,
+        #            training_args.model_max_length,
+        #            tokenizer,
+        #        ),
+        #        batched=True,
+        #        desc=f"Grouping texts in chunks of {training_args.model_max_length}",
+        #        remove_columns="text",
+        #    )
+        #)
 
+        train_data = (
+            train_data["train"])
+        
+        #val_data = (
+        #    val_data["train"]
+        #    .map(
+        #        partial(
+        #            batch_grouped_pretrain_generate,
+        #            training_args.model_max_length,
+        #            tokenizer,
+        #        ),
+        #        batched=True,
+        #        desc=f"Grouping texts in chunks of {training_args.model_max_length}",
+        #        remove_columns="text",
+        #    )
+        #)
         val_data = (
-            val_data["train"]
-            .map(
-                partial(
-                    batch_grouped_pretrain_generate,
-                    training_args.model_max_length,
-                    tokenizer,
-                ),
-                batched=True,
-                desc=f"Grouping texts in chunks of {training_args.model_max_length}",
-                remove_columns="text",
-            )
-        )
+            val_data["train"])
 
     for i in range(2):
         print_rank_0(
@@ -408,7 +491,7 @@ def main():
     # https://huggingface.co/docs/accelerate/usage_guides/deepspeed
     # https://huggingface.co/transformers/v4.10.1/main_classes/deepspeed.html
     # https://github.com/tatsu-lab/stanford_alpaca/issues/176
-    trainer = Trainer(
+    trainer = CustomTrainer(
         model=model,
         tokenizer=tokenizer,
         args=training_args,
@@ -468,6 +551,7 @@ def main():
         checkpoint = training_args.resume_from_checkpoint
     elif last_checkpoint is not None:
         checkpoint = last_checkpoint
+    get_gpu_memory_info()
     trainer.train(resume_from_checkpoint=checkpoint)
     trainer.save_model(training_args.output_dir)
     print_rank_0(
