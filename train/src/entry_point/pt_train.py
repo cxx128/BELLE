@@ -9,7 +9,9 @@ from transformers import (
     TrainingArguments,
     set_seed,
 )
-from peft import LoraConfig, get_peft_model, prepare_model_for_int8_training
+from peft import LoraConfig, get_peft_model
+def prepare_model_for_int8_training(model):
+    return KeyError
 from datasets import load_dataset
 import transformers
 import torch
@@ -18,12 +20,15 @@ from typing import Optional
 from functools import partial
 from dataclasses import dataclass, field
 import os
+os.environ["NCCL_P2P_DISABLE"]="1"
+os.environ["NCCL_IB_DISABLE"]="1"
+os.environ["CUDA_VISIBLE_DEVICES"]='4,5,6,7'
 import math
 import logging
 import json
 import sys
 
-sys.path.append('/work/home/acehekbmzh/cxx/BELLE/train')
+sys.path.append('/mnt/afs/chenxiaoxuan/BELLE/train')
 from src.utils import get_model_param_count
 from src.sample_generator import batch_grouped_pretrain_generate
 from transformers import LlamaForCausalLM #from src.models.llama.modeling_llama import LlamaForCausalLM

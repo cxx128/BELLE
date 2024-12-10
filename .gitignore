@@ -14,3 +14,4 @@ hf_cache_dir
 data
 work_dirs/
 exp*
+data/dataset

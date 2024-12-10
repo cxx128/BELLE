@@ -16,7 +16,7 @@ import torch.optim as optim
 import torch.multiprocessing as mp
 import time
 
-sys.path.append('/work/home/acehekbmzh/cxx/BELLE/train')
+sys.path.append('/mnt/afs/chenxiaoxuan/BELLE/train')
 
 
 import pickle

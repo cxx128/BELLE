@@ -8,9 +8,9 @@
       "offload_param": {
           "device": "cpu",
           "pin_memory": true
-      }
+      },
+      "stage3_gather_16bit_weights_on_model_save": true
     },
-    ###33存储权重fp16
     "fp16": {
         "enabled": "auto",
         "auto_cast": false,
