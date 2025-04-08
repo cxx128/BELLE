@@ -12,3 +12,7 @@ infer_res
 wandb
 hf_cache_dir
 data
+
+
+work_dirs
+data/dataset

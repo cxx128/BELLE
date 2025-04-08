@@ -1,3 +1,5 @@
+import sys
+sys.path.append('/mnt/afs/chenxiaoxuan/BELLE/train')
 from transformers.utils import add_start_docstrings
 from transformers.trainer_utils import get_last_checkpoint
 from transformers.trainer_pt_utils import torch_distributed_zero_first
@@ -9,7 +11,9 @@ from transformers import (
     TrainingArguments,
     set_seed,
 )
-from peft import LoraConfig, get_peft_model, prepare_model_for_int8_training
+from peft import LoraConfig, get_peft_model#, prepare_model_for_int8_training
+def prepare_model_for_int8_training(model):
+    return ValueError
 from datasets import load_dataset
 import transformers
 import torch
@@ -22,14 +26,17 @@ import os
 import math
 import logging
 import json
-import sys
+
 
 from src.utils import get_model_param_count
 from src.sample_generator import (
     batch_grouped_sft_generate,
     generate_and_tokenize_prompt,
 )
-from src.models.llama.modeling_llama import LlamaForCausalLM
+#from src.models.llama.modeling_llama import LlamaForCausalLM
+class LlamaForCausalLM():
+    def __init__(self):
+        self.xx='xx'
 
 if version.parse(transformers.__version__) <= version.parse("4.30.2"):
     from src.trainer import MyTrainer as Trainer
@@ -37,6 +44,7 @@ else:
     from transformers import Trainer
 
 logger = logging.getLogger(__name__)
+os.environ["WANDB_DISABLED"] = "true"
 
 @dataclass
 class ModelArguments:
@@ -72,7 +80,8 @@ class ModelArguments:
         default=False, metadata={"help": ("Whether to use memory efficient attention.")}
     )
     llama: bool = field(default=False, metadata={"help": "Llama model"})
-
+    qwen: bool = field(default=False, metadata={"help": "Qwen model"})
+    glm4: bool = field(default=False, metadata={"help": "Glm4 model"})
 
 @dataclass
 class DataArguments:
@@ -131,7 +140,7 @@ class TrainingArguments(TrainingArguments):
         },
     )
     report_to: str = field(
-        default="wandb",
+        default=None,#"wandb",
         metadata={
             "help": "The list of integrations to report the results and logs to."
         },
@@ -146,7 +155,7 @@ class TrainingArguments(TrainingArguments):
         },
     )
     do_train: bool = field(default=True, metadata={"help": "Whether to run training."})
-
+    logging_dir: Optional[str] = field(default=None, metadata={"help": "Tensorboard log dir."})
 
 def print_rank_0(msg, log_file, rank=0):
     if rank <= 0:
@@ -251,10 +260,16 @@ def main():
             global_rank,
         )
         tokenizer.add_special_tokens({'bos_token': '<s>', 'eos_token': '</s>', 'unk_token': '<unk>', 'pad_token': '<unk>'})
+        tokenizer.padding_side = "left"  # Allow batched inference
+    elif model_args.qwen:
+        tokenizer = AutoTokenizer.from_pretrained(model_args.model_name_or_path,padding_side="right",use_fast=False,trust_remote_code=True)
+        #tokenizer.pad_token_id = tokenizer.eod_id
+    elif model_args.glm4:
+        tokenizer = AutoTokenizer.from_pretrained(model_args.model_name_or_path, padding_side="left", trust_remote_code=True)
     else:
         tokenizer = AutoTokenizer.from_pretrained(model_args.model_name_or_path)
         tokenizer.add_special_tokens({"pad_token": tokenizer.unk_token})
-    tokenizer.padding_side = "left"  # Allow batched inference
+        tokenizer.padding_side = "left"  # Allow batched inference
 
     print_rank_0(
         "tokenizer.eos_token_id = {}".format(tokenizer.eos_token_id),
@@ -402,7 +417,7 @@ def main():
     # train steps
     t_total = math.ceil(training_nums / batch_size) * training_args.num_train_epochs
     # eval steps
-    training_args.eval_steps = max(t_total // (training_args.num_train_epochs * 4), 5)
+    training_args.eval_steps = max(t_total // (training_args.num_train_epochs * 4), 5)*500000
     # save steps
     training_args.save_steps = training_args.eval_steps
     training_args.warmup_steps = (
